@@ -3,122 +3,104 @@
 Contains the TestDBStorageDocs and TestDBStorage classes
 """
 
-import json
-from models import base_model, amenity, city, place, review, state, user
-from datetime import datetime
+import models
+from models.amenity import Amenity
+from models.base_model import BaseModel, Base
+from models.city import City
+from models.place import Place
+from models.review import Review
+from models.state import State
+from models.user import User
+from os import getenv
+import sqlalchemy
+from sqlalchemy import create_engine
+from sqlalchemy.orm import scoped_session, sessionmaker
 
-strptime = datetime.strptime
-to_json = base_model.BaseModel.to_json
+classes = {"Amenity": Amenity, "City": City,
+           "Place": Place, "Review": Review, "State": State, "User": User}
 
 
-class FileStorage:
-    """
-        handles long term storage of all class instances
-    """
-    CNC = {
-        'BaseModel': base_model.BaseModel,
-        'Amenity': amenity.Amenity,
-        'City': city.City,
-        'Place': place.Place,
-        'Review': review.Review,
-        'State': state.State,
-        'User': user.User
-    }
-    """CNC - this variable is a dictionary with:
-    keys: Class Names
-    values: Class type (used for instantiation)
-    """
-    __file_path = './dev/file.json'
-    __objects = {}
+class DBStorage:
+    """interaacts with the MySQL database"""
+    __engine = None
+    __session = None
+
+    def __init__(self):
+        """Instantiate a DBStorage object"""
+        HBNB_MYSQL_USER = getenv('HBNB_MYSQL_USER')
+        HBNB_MYSQL_PWD = getenv('HBNB_MYSQL_PWD')
+        HBNB_MYSQL_HOST = getenv('HBNB_MYSQL_HOST')
+        HBNB_MYSQL_DB = getenv('HBNB_MYSQL_DB')
+        HBNB_ENV = getenv('HBNB_ENV')
+        self.__engine = create_engine('mysql+mysqldb://{}:{}@{}/{}'.
+                                      format(HBNB_MYSQL_USER,
+                                             HBNB_MYSQL_PWD,
+                                             HBNB_MYSQL_HOST,
+                                             HBNB_MYSQL_DB))
+        if HBNB_ENV == "test":
+            Base.metadata.drop_all(self.__engine)
 
     def all(self, cls=None):
-        """
-            returns private attribute: __objects
-        """
-        if cls is not None:
-            new_objs = {}
-            for clsid, obj in FileStorage.__objects.items():
-                if type(obj).__name__ == cls:
-                    new_objs[clsid] = obj
-            return new_objs
-        else:
-            return FileStorage.__objects
+        """query on the current database session"""
+        new_dict = {}
+        for clss in classes:
+            if cls is None or cls is classes[clss] or cls is clss:
+                objs = self.__session.query(classes[clss]).all()
+                for obj in objs:
+                    key = obj.__class__.__name__ + '.' + obj.id
+                    new_dict[key] = obj
+        return (new_dict)
 
     def new(self, obj):
-        """
-            sets / updates in __objects the obj with key <obj class name>.id
-        """
-        bm_id = "{}.{}".format(type(obj).__name__, obj.id)
-        FileStorage.__objects[bm_id] = obj
+        """add the object to the current database session"""
+        self.__session.add(obj)
 
     def save(self):
-        """
-            serializes __objects to the JSON file (path: __file_path)
-        """
-        fname = FileStorage.__file_path
-        storage_d = {}
-        for bm_id, bm_obj in FileStorage.__objects.items():
-            storage_d[bm_id] = bm_obj.to_json(saving_file_storage=True)
-        with open(fname, mode='w', encoding='utf-8') as f_io:
-            json.dump(storage_d, f_io)
-
-    def reload(self):
-        """
-            if file exists, deserializes JSON file to __objects, else nothing
-        """
-        fname = FileStorage.__file_path
-        FileStorage.__objects = {}
-        try:
-            with open(fname, mode='r', encoding='utf-8') as f_io:
-                new_objs = json.load(f_io)
-        except:
-            return
-        for o_id, d in new_objs.items():
-            k_cls = d['__class__']
-            FileStorage.__objects[o_id] = FileStorage.CNC[k_cls](**d)
+        """commit all changes of the current database session"""
+        self.__session.commit()
 
     def delete(self, obj=None):
-        """
-            deletes obj from __objects if it's inside
-        """
-        if obj:
-            obj_ref = "{}.{}".format(type(obj).__name__, obj.id)
-            all_class_objs = self.all(obj.__class__.__name__)
-            if all_class_objs.get(obj_ref):
-                del FileStorage.__objects[obj_ref]
-            self.save()
+        """delete from the current database session obj if not None"""
+        if obj is not None:
+            self.__session.delete(obj)
 
-    def delete_all(self):
-        """
-            deletes all stored objects, for testing purposes
-        """
-        try:
-            with open(FileStorage.__file_path, mode='w') as f_io:
-                pass
-        except:
-            pass
-        del FileStorage.__objects
-        FileStorage.__objects = {}
-        self.save()
+    def reload(self):
+        """reloads data from the database"""
+        Base.metadata.create_all(self.__engine)
+        sess_factory = sessionmaker(bind=self.__engine, expire_on_commit=False)
+        Session = scoped_session(sess_factory)
+        self.__session = Session
 
     def close(self):
-        """
-            calls the reload() method for deserialization from JSON to objects
-        """
-        self.reload()
+        """call remove() method on the private session attribute"""
+        self.__session.remove()
 
     def get(self, cls, id):
         """
-            retrieves one object based on class name and id
+        Returns one object based on the class name and its ID, or
+        None if not found
         """
-        if cls and id:
-            fetch_obj = "{}.{}".format(cls, id)
-            all_obj = self.all(cls)
-            return all_obj.get(fetch_obj)
+        if cls not in classes.values():
+            return None
+
+        all_cls = models.storage.all(cls)
+        for value in all_cls.values():
+            if (value.id == id):
+                return value
+
         return None
 
     def count(self, cls=None):
         """
-        count of all objects in storage
+        Counts and returns the number of objects in storage matching the given class
         """
-        return (len(self.all(cls)))
+        all_class = classes.values()
+
+        if not cls:
+            count = 0
+            for clas in all_class:
+                count += len(models.storage.all(clas).values())
+        else:
+            count = len(models.storage.all(cls).values())
+
+        return count
